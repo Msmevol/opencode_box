@@ -1,5 +1,6 @@
 #include "sandbox.h"
 #include "ipc_protocol.h"
+#include "logger.h"
 #include <stdio.h>
 #include <string.h>
 #include <userenv.h>
@@ -10,7 +11,7 @@
 static HANDLE create_job_object(const SandboxPolicy *policy) {
     HANDLE hJob = CreateJobObjectW(NULL, NULL);
     if (!hJob) {
-        fprintf(stderr, "[sandbox] CreateJobObject failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "CreateJobObject failed: %lu", GetLastError());
         return NULL;
     }
 
@@ -29,7 +30,7 @@ static HANDLE create_job_object(const SandboxPolicy *policy) {
 
     if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
                                   &ext, sizeof(ext))) {
-        fprintf(stderr, "[sandbox] SetInformationJobObject (extended) failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "SetInformationJobObject (extended) failed: %lu", GetLastError());
         CloseHandle(hJob);
         return NULL;
     }
@@ -42,7 +43,7 @@ static HANDLE create_job_object(const SandboxPolicy *policy) {
         cpu.CpuRate = policy->cpu_rate_percent * 100; /* in hundredths of a percent */
         if (!SetInformationJobObject(hJob, JobObjectCpuRateControlInformation,
                                       &cpu, sizeof(cpu))) {
-            fprintf(stderr, "[sandbox] SetInformationJobObject (CPU) failed: %lu\n", GetLastError());
+            log_msg(LOG_WARN, "SetInformationJobObject (CPU) failed: %lu", GetLastError());
             /* Non-fatal, continue */
         }
     }
@@ -55,7 +56,7 @@ static HANDLE create_restricted_token(void) {
     HANDLE hRestricted = NULL;
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &hToken)) {
-        fprintf(stderr, "[sandbox] OpenProcessToken failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "OpenProcessToken failed: %lu", GetLastError());
         return NULL;
     }
 
@@ -65,7 +66,7 @@ static HANDLE create_restricted_token(void) {
                                 0, NULL,   /* no privileges to delete (DISABLE_MAX_PRIVILEGE handles it) */
                                 0, NULL,   /* no restricting SIDs */
                                 &hRestricted)) {
-        fprintf(stderr, "[sandbox] CreateRestrictedToken failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "CreateRestrictedToken failed: %lu", GetLastError());
         CloseHandle(hToken);
         return NULL;
     }
@@ -82,13 +83,13 @@ static HANDLE create_policy_shared_memory(DWORD pid, const SandboxPolicy *policy
                                       PAGE_READWRITE, 0,
                                       (DWORD)sizeof(SandboxPolicy), name);
     if (!hMap) {
-        fprintf(stderr, "[sandbox] CreateFileMapping failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "CreateFileMapping failed: %lu", GetLastError());
         return NULL;
     }
 
     void *pView = MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, sizeof(SandboxPolicy));
     if (!pView) {
-        fprintf(stderr, "[sandbox] MapViewOfFile failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "MapViewOfFile failed: %lu", GetLastError());
         CloseHandle(hMap);
         return NULL;
     }
@@ -130,13 +131,13 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
                                NULL, NULL, FALSE,
                                CREATE_SUSPENDED | CREATE_NEW_CONSOLE,
                                NULL, NULL, &si, &pi)) {
-        fprintf(stderr, "[sandbox] CreateProcessAsUser failed: %lu\n", GetLastError());
+        log_msg(LOG_WARN, "CreateProcessAsUser failed: %lu", GetLastError());
         /* Fallback: try CreateProcess without restricted token */
-        fprintf(stderr, "[sandbox] Falling back to CreateProcess (no token restriction)\n");
+        log_msg(LOG_WARN, "Falling back to CreateProcess (no token restriction)");
         if (!CreateProcessA(NULL, cmd_line, NULL, NULL, FALSE,
                             CREATE_SUSPENDED | CREATE_NEW_CONSOLE,
                             NULL, NULL, &si, &pi)) {
-            fprintf(stderr, "[sandbox] CreateProcess also failed: %lu\n", GetLastError());
+            log_msg(LOG_ERROR, "CreateProcess also failed: %lu", GetLastError());
             CloseHandle(hRestricted);
             CloseHandle(out->hJob);
             return -1;
@@ -146,7 +147,7 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
 
     /* 5. Assign to job object */
     if (!AssignProcessToJobObject(out->hJob, pi.hProcess)) {
-        fprintf(stderr, "[sandbox] AssignProcessToJobObject failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "AssignProcessToJobObject failed: %lu", GetLastError());
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -162,19 +163,19 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
     /* 6. Create shared memory for policy */
     out->hPolicyMapping = create_policy_shared_memory(pi.dwProcessId, policy);
     if (!out->hPolicyMapping) {
-        fprintf(stderr, "[sandbox] Warning: shared memory creation failed, hooks won't have policy\n");
+        log_msg(LOG_WARN, "Shared memory creation failed, hooks won't have policy");
     }
 
-    printf("[sandbox] Process created (PID: %lu), suspended, in job object\n", pi.dwProcessId);
+    log_msg(LOG_INFO, "Process created (PID: %lu), suspended, in job object", pi.dwProcessId);
     return 0;
 }
 
 int sandbox_resume(SandboxedProcess *sp) {
     if (ResumeThread(sp->hThread) == (DWORD)-1) {
-        fprintf(stderr, "[sandbox] ResumeThread failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "ResumeThread failed: %lu", GetLastError());
         return -1;
     }
-    printf("[sandbox] Process resumed\n");
+    log_msg(LOG_INFO, "Process resumed");
     return 0;
 }
 
@@ -188,6 +189,6 @@ DWORD sandbox_wait_and_cleanup(SandboxedProcess *sp) {
     if (sp->hProcess) CloseHandle(sp->hProcess);
     if (sp->hJob) CloseHandle(sp->hJob);
 
-    printf("[sandbox] Process exited with code %lu\n", exit_code);
+    log_msg(LOG_INFO, "Process exited with code %lu", exit_code);
     return exit_code;
 }

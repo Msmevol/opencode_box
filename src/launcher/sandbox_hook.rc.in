@@ -1,0 +1,2 @@
+#include "resource_ids.h"
+IDR_SANDBOX_HOOK_DLL  RCDATA  "@SANDBOX_HOOK_DLL_PATH@"

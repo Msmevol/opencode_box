@@ -1,5 +1,6 @@
 #include "ipc_server.h"
 #include "ipc_protocol.h"
+#include "logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@ static DWORD WINAPI ipc_server_thread(LPVOID param) {
             } else if (err == ERROR_NO_DATA || err == ERROR_BROKEN_PIPE) {
                 continue;
             } else {
-                fprintf(stderr, "[ipc] ConnectNamedPipe failed: %lu\n", err);
+                log_msg(LOG_ERROR, "ConnectNamedPipe failed: %lu", err);
                 break;
             }
         }
@@ -55,15 +56,14 @@ static DWORD WINAPI ipc_server_thread(LPVOID param) {
             }
 
             if (header.msg_type == IPC_MSG_LOG_EVENT) {
-                /* Just print the log */
+                /* Log the event */
                 wchar_t *wmsg = (wchar_t *)payload;
-                printf("[sandbox:%lu] %ls\n", srv->target_pid, wmsg);
+                log_msg(LOG_INFO, "[pid:%lu] %ls", srv->target_pid, wmsg);
             }
             else if (header.msg_type == IPC_MSG_ASK_PERMISSION) {
                 wchar_t *resource = (wchar_t *)payload;
-                printf("\n[sandbox] Process %lu requests %s access:\n",
-                       srv->target_pid, resource_type_str(header.resource_type));
-                printf("  Resource: %ls\n", resource);
+                log_msg(LOG_WARN, "Process %lu requests %s access: %ls",
+                        srv->target_pid, resource_type_str(header.resource_type), resource);
                 printf("  Allow? [y/n]: ");
                 fflush(stdout);
 
@@ -115,7 +115,7 @@ IpcServer *ipc_server_start(DWORD target_pid, const SandboxPolicy *policy) {
     );
 
     if (srv->hPipe == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "[ipc] CreateNamedPipe failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "CreateNamedPipe failed: %lu", GetLastError());
         free(srv);
         return NULL;
     }
@@ -123,13 +123,13 @@ IpcServer *ipc_server_start(DWORD target_pid, const SandboxPolicy *policy) {
     /* Start server thread */
     srv->hThread = CreateThread(NULL, 0, ipc_server_thread, srv, 0, NULL);
     if (!srv->hThread) {
-        fprintf(stderr, "[ipc] CreateThread failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "IPC CreateThread failed: %lu", GetLastError());
         CloseHandle(srv->hPipe);
         free(srv);
         return NULL;
     }
 
-    printf("[ipc] Server started on %s\n", pipe_name);
+    log_msg(LOG_INFO, "IPC server started on %s", pipe_name);
     return srv;
 }
 

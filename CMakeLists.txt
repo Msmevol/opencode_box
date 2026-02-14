@@ -37,17 +37,7 @@ add_library(sandbox_common STATIC
 target_include_directories(sandbox_common PUBLIC src/common)
 target_link_libraries(sandbox_common PRIVATE cjson)
 
-# --- Launcher executable ---
-add_executable(sandbox
-    src/launcher/main.c
-    src/launcher/sandbox.c
-    src/launcher/injector.c
-    src/launcher/ipc_server.c
-)
-target_include_directories(sandbox PRIVATE src/launcher src/common)
-target_link_libraries(sandbox PRIVATE sandbox_common cjson detours advapi32 userenv)
-
-# --- Hook DLL ---
+# --- Hook DLL (built first for embedding into EXE) ---
 add_library(sandbox_hook SHARED
     src/hookdll/dllmain.c
     src/hookdll/hooks_file.c
@@ -59,6 +49,37 @@ add_library(sandbox_hook SHARED
 )
 target_include_directories(sandbox_hook PRIVATE src/hookdll src/common extern/detours/src)
 target_link_libraries(sandbox_hook PRIVATE sandbox_common cjson detours ws2_32 advapi32)
+
+# Force DLL output to a known path for resource embedding
+set_target_properties(sandbox_hook PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hookdll_out"
+)
+
+# Generate .rc file that embeds the hook DLL binary
+set(SANDBOX_HOOK_DLL_PATH "${CMAKE_BINARY_DIR}/hookdll_out/sandbox_hook.dll")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/launcher/sandbox_hook.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/sandbox_hook.rc"
+    @ONLY
+)
+
+# --- Launcher executable (single EXE with embedded DLL) ---
+add_executable(sandbox
+    src/launcher/main.c
+    src/launcher/sandbox.c
+    src/launcher/injector.c
+    src/launcher/ipc_server.c
+    src/common/logger.c
+    "${CMAKE_CURRENT_BINARY_DIR}/sandbox_hook.rc"
+)
+target_include_directories(sandbox PRIVATE src/launcher src/common)
+target_link_libraries(sandbox PRIVATE sandbox_common cjson detours advapi32 userenv)
+add_dependencies(sandbox sandbox_hook)
+
+# Ensure .rc compilation waits for the DLL file to exist (file-level dependency)
+set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/sandbox_hook.rc" PROPERTIES
+    OBJECT_DEPENDS "${SANDBOX_HOOK_DLL_PATH}"
+)
 
 # --- Test target ---
 add_executable(test_target tests/test_target.c)

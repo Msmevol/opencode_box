@@ -10,16 +10,8 @@
 
     "allowed_dirs": [
         {
-            "path": "C:\\Users\\*\\AppData\\Local\\Temp\\**",
+            "path": "C:\\project\\box_opencode_2",
             "writable": true
-        },
-        {
-            "path": "C:\\Windows\\System32\\**",
-            "writable": false
-        },
-        {
-            "path": "C:\\project\\box_opencode_2\\**",
-            "writable": false
         }
     ],
 

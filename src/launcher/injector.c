@@ -1,6 +1,7 @@
 #include "injector.h"
 #include "sandbox.h"
 #include "ipc_protocol.h"
+#include "logger.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -17,14 +18,14 @@ int injector_inject(SandboxedProcess *sp, const wchar_t *dll_path,
     void *remote_buf = VirtualAllocEx(sp->hProcess, NULL, path_bytes,
                                        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote_buf) {
-        fprintf(stderr, "[injector] VirtualAllocEx failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "VirtualAllocEx failed: %lu", GetLastError());
         return -1;
     }
 
     /* 2. Write DLL path into target */
     SIZE_T written = 0;
     if (!WriteProcessMemory(sp->hProcess, remote_buf, dll_path, path_bytes, &written)) {
-        fprintf(stderr, "[injector] WriteProcessMemory failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "WriteProcessMemory failed: %lu", GetLastError());
         VirtualFreeEx(sp->hProcess, remote_buf, 0, MEM_RELEASE);
         return -1;
     }
@@ -32,13 +33,13 @@ int injector_inject(SandboxedProcess *sp, const wchar_t *dll_path,
     /* 3. Get LoadLibraryW address */
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
     if (!hKernel32) {
-        fprintf(stderr, "[injector] GetModuleHandle(kernel32) failed\n");
+        log_msg(LOG_ERROR, "GetModuleHandle(kernel32) failed");
         VirtualFreeEx(sp->hProcess, remote_buf, 0, MEM_RELEASE);
         return -1;
     }
     FARPROC pLoadLibW = GetProcAddress(hKernel32, "LoadLibraryW");
     if (!pLoadLibW) {
-        fprintf(stderr, "[injector] GetProcAddress(LoadLibraryW) failed\n");
+        log_msg(LOG_ERROR, "GetProcAddress(LoadLibraryW) failed");
         VirtualFreeEx(sp->hProcess, remote_buf, 0, MEM_RELEASE);
         return -1;
     }
@@ -48,7 +49,7 @@ int injector_inject(SandboxedProcess *sp, const wchar_t *dll_path,
                                          (LPTHREAD_START_ROUTINE)pLoadLibW,
                                          remote_buf, 0, NULL);
     if (!hThread) {
-        fprintf(stderr, "[injector] CreateRemoteThread failed: %lu\n", GetLastError());
+        log_msg(LOG_ERROR, "CreateRemoteThread failed: %lu", GetLastError());
         VirtualFreeEx(sp->hProcess, remote_buf, 0, MEM_RELEASE);
         return -1;
     }
@@ -64,10 +65,10 @@ int injector_inject(SandboxedProcess *sp, const wchar_t *dll_path,
     VirtualFreeEx(sp->hProcess, remote_buf, 0, MEM_RELEASE);
 
     if (exit_code == 0) {
-        fprintf(stderr, "[injector] Warning: LoadLibraryW returned NULL in target\n");
+        log_msg(LOG_WARN, "LoadLibraryW returned NULL in target");
         return -1;
     }
 
-    printf("[injector] DLL injected successfully (module base: 0x%lx)\n", exit_code);
+    log_msg(LOG_INFO, "DLL injected successfully (module base: 0x%lx)", exit_code);
     return 0;
 }
