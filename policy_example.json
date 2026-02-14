@@ -1,0 +1,44 @@
+{
+    "target": "C:\\Windows\\System32\\notepad.exe",
+    "args": "",
+
+    "resources": {
+        "memory_limit_mb": 256,
+        "cpu_rate_percent": 25,
+        "max_processes": 2
+    },
+
+    "allowed_dirs": [
+        {
+            "path": "C:\\Users\\*\\AppData\\Local\\Temp\\**",
+            "writable": true
+        },
+        {
+            "path": "C:\\Windows\\System32\\**",
+            "writable": false
+        }
+    ],
+
+    "domain_whitelist": [
+        "localhost",
+        "*.github.com",
+        "api.openai.com"
+    ],
+
+    "registry_rules": [
+        {
+            "pattern": "HKCU\\Software\\**",
+            "action": "allow"
+        },
+        {
+            "pattern": "HKLM\\**",
+            "action": "deny"
+        },
+        {
+            "pattern": "*",
+            "action": "ask"
+        }
+    ],
+
+    "process_creation": "deny"
+}
