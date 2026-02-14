@@ -2,6 +2,7 @@
 #include "ipc_protocol.h"
 #include "logger.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <userenv.h>
 
@@ -99,6 +100,38 @@ static HANDLE create_policy_shared_memory(DWORD pid, const SandboxPolicy *policy
     return hMap;
 }
 
+/* Build a minimal environment block with only essential system variables.
+   Returns a malloc'd block that the caller must free, or NULL on failure. */
+static char *build_minimal_env(void) {
+    /* Essential vars to keep the OS and basic programs functional */
+    static const char *keep_vars[] = {
+        "SystemRoot", "SystemDrive", "TEMP", "TMP",
+        "COMSPEC", "PATHEXT", "WINDIR", "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE", "OS",
+        NULL
+    };
+
+    char block[8192];
+    size_t pos = 0;
+
+    for (int i = 0; keep_vars[i]; i++) {
+        char val[1024];
+        DWORD len = GetEnvironmentVariableA(keep_vars[i], val, sizeof(val));
+        if (len > 0 && len < sizeof(val)) {
+            int n = snprintf(block + pos, sizeof(block) - pos,
+                             "%s=%s", keep_vars[i], val);
+            if (n < 0 || pos + n + 1 >= sizeof(block)) break;
+            pos += n + 1; /* include the null terminator */
+        }
+    }
+    block[pos] = '\0'; /* double-null terminator */
+    pos++;
+
+    char *result = (char *)malloc(pos);
+    if (result) memcpy(result, block, pos);
+    return result;
+}
+
 int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
     memset(out, 0, sizeof(SandboxedProcess));
 
@@ -122,7 +155,14 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
         snprintf(cmd_line, sizeof(cmd_line), "\"%s\"", policy->target_exe);
     }
 
-    /* 4. Create process suspended with restricted token */
+    /* 4. Build environment block */
+    char *env_block = NULL;
+    if (!policy->inherit_env) {
+        env_block = build_minimal_env();
+        log_msg(LOG_INFO, "Using minimal environment (inherit_env=false)");
+    }
+
+    /* 5. Create process suspended with restricted token */
     STARTUPINFOA si = {0};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {0};
@@ -130,19 +170,21 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
     if (!CreateProcessAsUserA(hRestricted, NULL, cmd_line,
                                NULL, NULL, FALSE,
                                CREATE_SUSPENDED | CREATE_NEW_CONSOLE,
-                               NULL, NULL, &si, &pi)) {
+                               env_block, NULL, &si, &pi)) {
         log_msg(LOG_WARN, "CreateProcessAsUser failed: %lu", GetLastError());
         /* Fallback: try CreateProcess without restricted token */
         log_msg(LOG_WARN, "Falling back to CreateProcess (no token restriction)");
         if (!CreateProcessA(NULL, cmd_line, NULL, NULL, FALSE,
                             CREATE_SUSPENDED | CREATE_NEW_CONSOLE,
-                            NULL, NULL, &si, &pi)) {
+                            env_block, NULL, &si, &pi)) {
             log_msg(LOG_ERROR, "CreateProcess also failed: %lu", GetLastError());
+            free(env_block);
             CloseHandle(hRestricted);
             CloseHandle(out->hJob);
             return -1;
         }
     }
+    free(env_block);
     CloseHandle(hRestricted);
 
     /* 5. Assign to job object */

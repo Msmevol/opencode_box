@@ -7,9 +7,10 @@ set(CMAKE_CXX_STANDARD 17)
 # Prevent winsock.h vs winsock2.h conflicts globally
 add_compile_definitions(WIN32_LEAN_AND_MEAN)
 
-# --- Third-party: cJSON ---
-add_library(cjson STATIC extern/cJSON/cJSON.c)
-target_include_directories(cjson PUBLIC extern/cJSON)
+# MSVC: treat source and execution charset as UTF-8
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 # --- Third-party: Detours ---
 set(DETOURS_SRC
@@ -35,7 +36,6 @@ add_library(sandbox_common STATIC
     src/common/path_match.c
 )
 target_include_directories(sandbox_common PUBLIC src/common)
-target_link_libraries(sandbox_common PRIVATE cjson)
 
 # --- Hook DLL (built first for embedding into EXE) ---
 add_library(sandbox_hook SHARED
@@ -48,7 +48,7 @@ add_library(sandbox_hook SHARED
     src/hookdll/hook_policy.c
 )
 target_include_directories(sandbox_hook PRIVATE src/hookdll src/common extern/detours/src)
-target_link_libraries(sandbox_hook PRIVATE sandbox_common cjson detours ws2_32 advapi32)
+target_link_libraries(sandbox_hook PRIVATE sandbox_common detours ws2_32 advapi32)
 
 # Force DLL output to a known path for resource embedding
 set_target_properties(sandbox_hook PROPERTIES
@@ -73,7 +73,7 @@ add_executable(sandbox
     "${CMAKE_CURRENT_BINARY_DIR}/sandbox_hook.rc"
 )
 target_include_directories(sandbox PRIVATE src/launcher src/common)
-target_link_libraries(sandbox PRIVATE sandbox_common cjson detours advapi32 userenv)
+target_link_libraries(sandbox PRIVATE sandbox_common detours advapi32 userenv)
 add_dependencies(sandbox sandbox_hook)
 
 # Ensure .rc compilation waits for the DLL file to exist (file-level dependency)

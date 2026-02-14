@@ -9,9 +9,9 @@
 #include "resource_ids.h"
 
 static void print_usage(const char *prog) {
-    printf("Usage: %s --policy <policy.json> [--log <file>]\n", prog);
+    printf("Usage: %s [--policy <policy.json>] [--log <file>]\n", prog);
     printf("\nOptions:\n");
-    printf("  --policy <file>   Path to JSON policy file\n");
+    printf("  --policy <file>   Path to INI policy file (default: policy.ini in exe dir)\n");
     printf("  --log <file>      Path to log file (default: stdout only)\n");
     printf("  --dry-run         Show policy without executing\n");
     printf("  --help            Show this help\n");
@@ -33,6 +33,7 @@ static void print_policy(const SandboxPolicy *p) {
     log_msg(LOG_INFO, "Process creation: %s",
             p->process_creation == POLICY_ALLOW ? "allow" :
             p->process_creation == POLICY_DENY ? "deny" : "ask");
+    log_msg(LOG_INFO, "Inherit environment: %s", p->inherit_env ? "yes" : "no");
 }
 
 static int extract_embedded_dll(wchar_t *out_path, size_t out_path_len) {
@@ -107,9 +108,22 @@ int main(int argc, char *argv[]) {
     }
 
     if (!policy_path) {
-        fprintf(stderr, "Error: --policy is required\n");
-        print_usage(argv[0]);
-        return 1;
+        /* Auto-detect policy.json in the same directory as the exe */
+        static char auto_path[MAX_PATH];
+        GetModuleFileNameA(NULL, auto_path, MAX_PATH);
+        char *last_slash = strrchr(auto_path, '\\');
+        if (last_slash) {
+            strcpy(last_slash + 1, "policy.ini");
+        } else {
+            strcpy(auto_path, "policy.ini");
+        }
+        if (GetFileAttributesA(auto_path) != INVALID_FILE_ATTRIBUTES) {
+            policy_path = auto_path;
+        } else {
+            fprintf(stderr, "Error: no --policy specified and policy.ini not found in exe directory\n");
+            print_usage(argv[0]);
+            return 1;
+        }
     }
 
     /* Initialize logger */

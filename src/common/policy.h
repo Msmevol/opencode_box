@@ -42,6 +42,9 @@ typedef struct {
     /* Process creation policy */
     PolicyAction process_creation;
 
+    /* Environment inheritance: 1 = inherit parent env, 0 = minimal env only */
+    int inherit_env;
+
     /* File whitelist: only these dirs are accessible, everything else denied */
     int file_allow_count;
     FileAllowRule file_allows[MAX_RULES];
