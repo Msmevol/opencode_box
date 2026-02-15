@@ -55,18 +55,24 @@ enum IniSection {
     SEC_TARGET,
     SEC_RESOURCES,
     SEC_POLICY,
+    SEC_LOGGING,
     SEC_ALLOWED_DIRS,
     SEC_DOMAIN_WHITELIST,
-    SEC_REGISTRY_RULES
+    SEC_REGISTRY_RULES,
+    SEC_ENVIRONMENT,
+    SEC_PATH_APPEND
 };
 
 static enum IniSection parse_section(const char *name) {
     if (_stricmp(name, "target") == 0)           return SEC_TARGET;
     if (_stricmp(name, "resources") == 0)         return SEC_RESOURCES;
     if (_stricmp(name, "policy") == 0)            return SEC_POLICY;
+    if (_stricmp(name, "logging") == 0)           return SEC_LOGGING;
     if (_stricmp(name, "allowed_dirs") == 0)      return SEC_ALLOWED_DIRS;
     if (_stricmp(name, "domain_whitelist") == 0)  return SEC_DOMAIN_WHITELIST;
     if (_stricmp(name, "registry_rules") == 0)    return SEC_REGISTRY_RULES;
+    if (_stricmp(name, "environment") == 0)       return SEC_ENVIRONMENT;
+    if (_stricmp(name, "path_append") == 0)       return SEC_PATH_APPEND;
     return SEC_NONE;
 }
 
@@ -75,6 +81,8 @@ int policy_load(const char *ini_path, SandboxPolicy *out) {
     out->process_creation = POLICY_DENY;
     out->max_processes = 1;
     out->inherit_env = 1;
+    out->log_level = 1;     /* default: info */
+    out->log_to_file = 1;   /* default: save to file */
 
     FILE *f = fopen(ini_path, "r");
     if (!f) {
@@ -140,6 +148,19 @@ int policy_load(const char *ini_path, SandboxPolicy *out) {
                 out->inherit_env = (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0) ? 1 : 0;
             break;
 
+        case SEC_LOGGING:
+            if (!val) break;
+            if (_stricmp(key, "level") == 0) {
+                if (_stricmp(val, "debug") == 0)      out->log_level = 0;
+                else if (_stricmp(val, "info") == 0)   out->log_level = 1;
+                else if (_stricmp(val, "warn") == 0)   out->log_level = 2;
+                else if (_stricmp(val, "error") == 0)  out->log_level = 3;
+                else if (_stricmp(val, "off") == 0)    out->log_level = -1;
+            } else if (_stricmp(key, "file") == 0) {
+                out->log_to_file = (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0) ? 1 : 0;
+            }
+            break;
+
         case SEC_ALLOWED_DIRS:
             if (out->file_allow_count >= MAX_RULES) break;
             if (val) {
@@ -153,10 +174,8 @@ int policy_load(const char *ini_path, SandboxPolicy *out) {
         case SEC_DOMAIN_WHITELIST:
             if (out->domain_whitelist_count >= MAX_RULES) break;
             {
-                /* Line is just a domain name (no '=' needed) */
-                const char *domain = val ? key : key; /* use key either way */
                 int idx = out->domain_whitelist_count++;
-                strncpy(out->domain_whitelist[idx].domain, domain, MAX_DOMAIN_LEN - 1);
+                strncpy(out->domain_whitelist[idx].domain, key, MAX_DOMAIN_LEN - 1);
             }
             break;
 
@@ -166,6 +185,23 @@ int policy_load(const char *ini_path, SandboxPolicy *out) {
                 int idx = out->registry_rule_count++;
                 strncpy(out->registry_rules[idx].key_pattern, key, MAX_PATTERN_LEN - 1);
                 out->registry_rules[idx].action = parse_action(val);
+            }
+            break;
+
+        case SEC_ENVIRONMENT:
+            if (out->env_var_count >= MAX_RULES) break;
+            if (val) {
+                int idx = out->env_var_count++;
+                strncpy(out->env_vars[idx].key, key, sizeof(out->env_vars[idx].key) - 1);
+                strncpy(out->env_vars[idx].value, val, sizeof(out->env_vars[idx].value) - 1);
+            }
+            break;
+
+        case SEC_PATH_APPEND:
+            if (out->path_append_count >= MAX_RULES) break;
+            {
+                int idx = out->path_append_count++;
+                strncpy(out->path_appends[idx], key, MAX_PATH - 1);
             }
             break;
 

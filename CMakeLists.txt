@@ -69,6 +69,7 @@ add_executable(sandbox
     src/launcher/sandbox.c
     src/launcher/injector.c
     src/launcher/ipc_server.c
+    src/launcher/opencode_setup.c
     src/common/logger.c
     "${CMAKE_CURRENT_BINARY_DIR}/sandbox_hook.rc"
 )

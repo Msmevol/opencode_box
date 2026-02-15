@@ -66,19 +66,18 @@ static INT WSAAPI Hooked_getaddrinfo(
 {
     if (pNodeName && pNodeName[0]) {
         const SandboxPolicy *policy = hook_policy_get();
-        if (policy) {
-            PolicyAction action = policy_check_domain(policy, pNodeName);
-            if (action == POLICY_DENY) {
-                wchar_t msg[512];
-                swprintf(msg, 512, L"DENIED DNS resolve: %hs", pNodeName);
-                ipc_client_log(IPC_RESOURCE_NETWORK, msg);
-                return WSAHOST_NOT_FOUND;
-            }
-            {
-                wchar_t msg[512];
-                swprintf(msg, 512, L"ALLOWED DNS resolve: %hs", pNodeName);
-                ipc_client_log(IPC_RESOURCE_NETWORK, msg);
-            }
+        if (!policy) return WSAHOST_NOT_FOUND; /* fail-closed */
+        PolicyAction action = policy_check_domain(policy, pNodeName);
+        if (action == POLICY_DENY) {
+            wchar_t msg[512];
+            swprintf(msg, 512, L"DENIED DNS resolve: %hs", pNodeName);
+            ipc_client_log(IPC_RESOURCE_NETWORK, msg);
+            return WSAHOST_NOT_FOUND;
+        }
+        {
+            wchar_t msg[512];
+            swprintf(msg, 512, L"ALLOWED DNS resolve: %hs", pNodeName);
+            ipc_client_log(IPC_RESOURCE_NETWORK, msg);
         }
     }
     return Real_getaddrinfo(pNodeName, pServiceName, pHints, ppResult);
@@ -90,24 +89,23 @@ static INT WSAAPI Hooked_GetAddrInfoW(
 {
     if (pNodeName && pNodeName[0]) {
         const SandboxPolicy *policy = hook_policy_get();
-        if (policy) {
-            /* Convert wide domain to narrow for policy check */
-            char domain_a[MAX_DOMAIN_LEN];
-            WideCharToMultiByte(CP_UTF8, 0, pNodeName, -1,
-                                domain_a, sizeof(domain_a), NULL, NULL);
+        if (!policy) return WSAHOST_NOT_FOUND; /* fail-closed */
+        /* Convert wide domain to narrow for policy check */
+        char domain_a[MAX_DOMAIN_LEN];
+        WideCharToMultiByte(CP_UTF8, 0, pNodeName, -1,
+                            domain_a, sizeof(domain_a), NULL, NULL);
 
-            PolicyAction action = policy_check_domain(policy, domain_a);
-            if (action == POLICY_DENY) {
-                wchar_t msg[512];
-                swprintf(msg, 512, L"DENIED DNS resolve: %s", pNodeName);
-                ipc_client_log(IPC_RESOURCE_NETWORK, msg);
-                return WSAHOST_NOT_FOUND;
-            }
-            {
-                wchar_t msg[512];
-                swprintf(msg, 512, L"ALLOWED DNS resolve: %s", pNodeName);
-                ipc_client_log(IPC_RESOURCE_NETWORK, msg);
-            }
+        PolicyAction action = policy_check_domain(policy, domain_a);
+        if (action == POLICY_DENY) {
+            wchar_t msg[512];
+            swprintf(msg, 512, L"DENIED DNS resolve: %s", pNodeName);
+            ipc_client_log(IPC_RESOURCE_NETWORK, msg);
+            return WSAHOST_NOT_FOUND;
+        }
+        {
+            wchar_t msg[512];
+            swprintf(msg, 512, L"ALLOWED DNS resolve: %s", pNodeName);
+            ipc_client_log(IPC_RESOURCE_NETWORK, msg);
         }
     }
     return Real_GetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
@@ -118,11 +116,8 @@ static INT WSAAPI Hooked_GetAddrInfoW(
 static int WSAAPI Hooked_connect(SOCKET s, const struct sockaddr *name, int namelen) {
     if (name && !is_loopback_addr(name)) {
         const SandboxPolicy *policy = hook_policy_get();
-        if (policy && policy->domain_whitelist_count > 0) {
-            /* If domain whitelist is active, block direct IP connections
-               to non-loopback addresses. Legitimate traffic goes through
-               DNS first (which we already filtered). Direct IP connections
-               bypass DNS and should be blocked. */
+        if (!policy || policy->domain_whitelist_count > 0) {
+            /* No policy (fail-closed) or domain whitelist active: block direct IP */
             char ip[128];
             addr_to_str(name, ip, sizeof(ip));
             wchar_t msg[512];
@@ -141,7 +136,7 @@ static int WSAAPI Hooked_WSAConnect(SOCKET s, const struct sockaddr *name, int n
 {
     if (name && !is_loopback_addr(name)) {
         const SandboxPolicy *policy = hook_policy_get();
-        if (policy && policy->domain_whitelist_count > 0) {
+        if (!policy || policy->domain_whitelist_count > 0) {
             char ip[128];
             addr_to_str(name, ip, sizeof(ip));
             wchar_t msg[512];
@@ -159,7 +154,7 @@ static int WSAAPI Hooked_sendto(SOCKET s, const char *buf, int len, int flags,
 {
     if (to && !is_loopback_addr(to)) {
         const SandboxPolicy *policy = hook_policy_get();
-        if (policy && policy->domain_whitelist_count > 0) {
+        if (!policy || policy->domain_whitelist_count > 0) {
             WSASetLastError(WSAEACCES);
             return SOCKET_ERROR;
         }

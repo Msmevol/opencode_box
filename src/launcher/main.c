@@ -7,12 +7,12 @@
 #include "ipc_server.h"
 #include "logger.h"
 #include "resource_ids.h"
+#include "opencode_setup.h"
 
 static void print_usage(const char *prog) {
-    printf("Usage: %s [--policy <policy.json>] [--log <file>]\n", prog);
-    printf("\nOptions:\n");
-    printf("  --policy <file>   Path to INI policy file (default: policy.ini in exe dir)\n");
-    printf("  --log <file>      Path to log file (default: stdout only)\n");
+    printf("Usage: %s [policy.ini] [--dry-run] [--help]\n", prog);
+    printf("\nArguments:\n");
+    printf("  policy.ini        Path to INI policy file (default: policy.ini in exe dir)\n");
     printf("  --dry-run         Show policy without executing\n");
     printf("  --help            Show this help\n");
 }
@@ -34,6 +34,25 @@ static void print_policy(const SandboxPolicy *p) {
             p->process_creation == POLICY_ALLOW ? "allow" :
             p->process_creation == POLICY_DENY ? "deny" : "ask");
     log_msg(LOG_INFO, "Inherit environment: %s", p->inherit_env ? "yes" : "no");
+    for (int i = 0; i < p->env_var_count; i++) {
+        log_msg(LOG_INFO, "  env[%d]: %s=%s", i, p->env_vars[i].key, p->env_vars[i].value);
+    }
+    for (int i = 0; i < p->path_append_count; i++) {
+        log_msg(LOG_INFO, "  PATH+: %s", p->path_appends[i]);
+    }
+}
+
+/* Build log file path: same directory as policy file, named sandbox.log */
+static void build_log_path(const char *policy_path, char *out, size_t out_len) {
+    strncpy(out, policy_path, out_len - 1);
+    out[out_len - 1] = '\0';
+    char *last_slash = strrchr(out, '\\');
+    if (!last_slash) last_slash = strrchr(out, '/');
+    if (last_slash) {
+        strcpy(last_slash + 1, "sandbox.log");
+    } else {
+        strcpy(out, "sandbox.log");
+    }
 }
 
 static int extract_embedded_dll(wchar_t *out_path, size_t out_path_len) {
@@ -87,28 +106,25 @@ static int extract_embedded_dll(wchar_t *out_path, size_t out_path_len) {
 
 int main(int argc, char *argv[]) {
     const char *policy_path = NULL;
-    const char *log_path = NULL;
     int dry_run = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
-            policy_path = argv[++i];
-        } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
-            log_path = argv[++i];
-        } else if (strcmp(argv[i], "--dry-run") == 0) {
+        if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
-        } else {
+        } else if (argv[i][0] == '-') {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             print_usage(argv[0]);
             return 1;
+        } else {
+            policy_path = argv[i];
         }
     }
 
     if (!policy_path) {
-        /* Auto-detect policy.json in the same directory as the exe */
+        /* Auto-detect policy.ini in the same directory as the exe */
         static char auto_path[MAX_PATH];
         GetModuleFileNameA(NULL, auto_path, MAX_PATH);
         char *last_slash = strrchr(auto_path, '\\');
@@ -126,19 +142,39 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Initialize logger */
-    if (logger_init(log_path, LOG_INFO) != 0) {
-        fprintf(stderr, "Failed to initialize logger\n");
+    /* Load policy first (need log settings before initializing logger) */
+    SandboxPolicy policy;
+    if (policy_load(policy_path, &policy) != 0) {
+        fprintf(stderr, "Failed to load policy from %s\n", policy_path);
         return 1;
     }
 
-    /* Load policy */
-    SandboxPolicy policy;
-    if (policy_load(policy_path, &policy) != 0) {
-        log_msg(LOG_ERROR, "Failed to load policy from %s", policy_path);
-        logger_cleanup();
-        return 1;
+    /* Initialize logger based on policy settings */
+    if (policy.log_level >= 0) {
+        const char *log_file = NULL;
+        char log_path[MAX_PATH];
+        if (policy.log_to_file) {
+            build_log_path(policy_path, log_path, sizeof(log_path));
+            log_file = log_path;
+        }
+        if (logger_init(log_file, (LogLevel)policy.log_level, 0) != 0) {
+            fprintf(stderr, "Failed to initialize logger\n");
+            return 1;
+        }
     }
+
+    /* Hide launcher console window — user only sees the target process window */
+    HWND hConsole = GetConsoleWindow();
+    if (hConsole) {
+        ShowWindow(hConsole, SW_HIDE);
+    }
+
+    /* Apply opencode.exe special setup (env vars, DLL extraction, etc.) */
+    opencode_setup(&policy);
+
+    /* Register cleanup as atexit handler — safety net for B: drive mapping
+       in case of crash or early exit */
+    atexit(opencode_cleanup);
 
     print_policy(&policy);
 
@@ -162,8 +198,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Start IPC server */
-    IpcServer *ipc = ipc_server_start(sp.dwProcessId, &policy);
+    /* Start IPC server (named with launcher PID, matching shared memory) */
+    IpcServer *ipc = ipc_server_start(GetCurrentProcessId(), &policy);
 
     /* Extract embedded DLL to temp file */
     wchar_t dll_path[MAX_PATH];
@@ -192,6 +228,9 @@ int main(int argc, char *argv[]) {
 
     /* Stop IPC */
     ipc_server_stop(ipc);
+
+    /* Remove B: drive mapping if created */
+    opencode_cleanup();
 
     logger_cleanup();
     return (int)exit_code;

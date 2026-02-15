@@ -8,6 +8,7 @@ static FILE *g_log_file = NULL;
 static LogLevel g_min_level = LOG_INFO;
 static CRITICAL_SECTION g_log_lock;
 static int g_initialized = 0;
+static int g_console = 0;
 
 static const char *level_str(LogLevel level) {
     switch (level) {
@@ -27,11 +28,12 @@ static void write_timestamp(FILE *f) {
             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 }
 
-int logger_init(const char *log_file_path, LogLevel min_level) {
+int logger_init(const char *log_file_path, LogLevel min_level, int console) {
     if (g_initialized) return 0;
 
     InitializeCriticalSection(&g_log_lock);
     g_min_level = min_level;
+    g_console = console;
 
     if (log_file_path) {
         g_log_file = fopen(log_file_path, "a");
@@ -54,13 +56,15 @@ void log_msg(LogLevel level, const char *fmt, ...) {
     EnterCriticalSection(&g_log_lock);
 
     /* stdout */
-    write_timestamp(stdout);
-    fprintf(stdout, " [%s] ", level_str(level));
-    va_start(args, fmt);
-    vfprintf(stdout, fmt, args);
-    va_end(args);
-    fprintf(stdout, "\n");
-    fflush(stdout);
+    if (g_console) {
+        write_timestamp(stdout);
+        fprintf(stdout, " [%s] ", level_str(level));
+        va_start(args, fmt);
+        vfprintf(stdout, fmt, args);
+        va_end(args);
+        fprintf(stdout, "\n");
+        fflush(stdout);
+    }
 
     /* log file */
     if (g_log_file) {

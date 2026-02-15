@@ -99,9 +99,14 @@ IpcServer *ipc_server_start(DWORD target_pid, const SandboxPolicy *policy) {
     srv->policy = policy;
     srv->running = TRUE;
 
-    /* Create named pipe */
+    /* Create named pipe with permissive security so restricted-token processes can connect */
     char pipe_name[128];
     snprintf(pipe_name, sizeof(pipe_name), "%s%lu", SANDBOX_PIPE_PREFIX, target_pid);
+
+    SECURITY_DESCRIPTOR sd;
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE); /* NULL DACL = allow all */
+    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), &sd, FALSE };
 
     srv->hPipe = CreateNamedPipeA(
         pipe_name,
@@ -111,7 +116,7 @@ IpcServer *ipc_server_start(DWORD target_pid, const SandboxPolicy *policy) {
         8192,   /* out buffer */
         8192,   /* in buffer */
         0,      /* default timeout */
-        NULL    /* default security */
+        &sa     /* permissive security for sandboxed process */
     );
 
     if (srv->hPipe == INVALID_HANDLE_VALUE) {

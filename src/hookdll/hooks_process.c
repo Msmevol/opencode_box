@@ -6,17 +6,21 @@
 #include <detours.h>
 #include <stdio.h>
 
+/* From dllmain.c */
+extern const wchar_t *hook_dll_get_path(void);
+
 /* Original function pointers */
 static BOOL (WINAPI *Real_CreateProcessW)(
     LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
     BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION) = CreateProcessW;
 
-static HINSTANCE (WINAPI *Real_ShellExecuteW)(
-    HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT) = NULL;
+static BOOL (WINAPI *Real_CreateProcessA)(
+    LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
+    BOOL, DWORD, LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION) = CreateProcessA;
 
 static PolicyAction check_process_creation(const wchar_t *exe_path) {
     const SandboxPolicy *policy = hook_policy_get();
-    if (!policy) return POLICY_ALLOW;
+    if (!policy) return POLICY_DENY;
 
     PolicyAction action = policy->process_creation;
     if (action == POLICY_ASK) {
@@ -30,6 +34,38 @@ static PolicyAction check_process_creation(const wchar_t *exe_path) {
     ipc_client_log(IPC_RESOURCE_PROCESS, msg);
 
     return action;
+}
+
+/* Inject our hook DLL into a child process (must be suspended) */
+static void inject_into_child(HANDLE hProcess) {
+    const wchar_t *dll_path = hook_dll_get_path();
+    if (!dll_path || !dll_path[0]) return;
+
+    size_t path_bytes = (wcslen(dll_path) + 1) * sizeof(wchar_t);
+    void *remote_buf = VirtualAllocEx(hProcess, NULL, path_bytes,
+                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote_buf) return;
+
+    SIZE_T written = 0;
+    if (!WriteProcessMemory(hProcess, remote_buf, dll_path, path_bytes, &written)) {
+        VirtualFreeEx(hProcess, remote_buf, 0, MEM_RELEASE);
+        return;
+    }
+
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hK32) { VirtualFreeEx(hProcess, remote_buf, 0, MEM_RELEASE); return; }
+
+    FARPROC pLoadLib = GetProcAddress(hK32, "LoadLibraryW");
+    if (!pLoadLib) { VirtualFreeEx(hProcess, remote_buf, 0, MEM_RELEASE); return; }
+
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+                                         (LPTHREAD_START_ROUTINE)pLoadLib,
+                                         remote_buf, 0, NULL);
+    if (hThread) {
+        WaitForSingleObject(hThread, 5000);
+        CloseHandle(hThread);
+    }
+    VirtualFreeEx(hProcess, remote_buf, 0, MEM_RELEASE);
 }
 
 static BOOL WINAPI Hooked_CreateProcessW(
@@ -46,47 +82,63 @@ static BOOL WINAPI Hooked_CreateProcessW(
         SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
-    return Real_CreateProcessW(lpApplicationName, lpCommandLine,
-                                lpProcessAttributes, lpThreadAttributes,
-                                bInheritHandles, dwCreationFlags,
-                                lpEnvironment, lpCurrentDirectory,
-                                lpStartupInfo, lpProcessInformation);
+
+    /* Force CREATE_SUSPENDED so we can inject before the child runs */
+    int was_suspended = (dwCreationFlags & CREATE_SUSPENDED) != 0;
+    BOOL ok = Real_CreateProcessW(lpApplicationName, lpCommandLine,
+                                   lpProcessAttributes, lpThreadAttributes,
+                                   bInheritHandles, dwCreationFlags | CREATE_SUSPENDED,
+                                   lpEnvironment, lpCurrentDirectory,
+                                   lpStartupInfo, lpProcessInformation);
+    if (ok) {
+        inject_into_child(lpProcessInformation->hProcess);
+        if (!was_suspended) {
+            ResumeThread(lpProcessInformation->hThread);
+        }
+    }
+    return ok;
 }
 
-static HINSTANCE WINAPI Hooked_ShellExecuteW(
-    HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile,
-    LPCWSTR lpParameters, LPCWSTR lpDirectory, INT nShowCmd)
+static BOOL WINAPI Hooked_CreateProcessA(
+    LPCSTR lpApplicationName, LPSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL bInheritHandles, DWORD dwCreationFlags,
+    LPVOID lpEnvironment, LPCSTR lpCurrentDirectory,
+    LPSTARTUPINFOA lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
 {
-    PolicyAction action = check_process_creation(lpFile);
+    /* Convert to wide for policy check */
+    wchar_t wexe[MAX_PATH] = {0};
+    const char *exe = lpApplicationName ? lpApplicationName : lpCommandLine;
+    if (exe) MultiByteToWideChar(CP_ACP, 0, exe, -1, wexe, MAX_PATH);
+
+    PolicyAction action = check_process_creation(wexe[0] ? wexe : NULL);
     if (action == POLICY_DENY) {
         SetLastError(ERROR_ACCESS_DENIED);
-        return (HINSTANCE)32; /* SE_ERR_ACCESSDENIED is < 32, but we return > 32 to avoid crash */
+        return FALSE;
     }
-    if (Real_ShellExecuteW) {
-        return Real_ShellExecuteW(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
+
+    int was_suspended = (dwCreationFlags & CREATE_SUSPENDED) != 0;
+    BOOL ok = Real_CreateProcessA(lpApplicationName, lpCommandLine,
+                                   lpProcessAttributes, lpThreadAttributes,
+                                   bInheritHandles, dwCreationFlags | CREATE_SUSPENDED,
+                                   lpEnvironment, lpCurrentDirectory,
+                                   lpStartupInfo, lpProcessInformation);
+    if (ok) {
+        inject_into_child(lpProcessInformation->hProcess);
+        if (!was_suspended) {
+            ResumeThread(lpProcessInformation->hThread);
+        }
     }
-    SetLastError(ERROR_ACCESS_DENIED);
-    return (HINSTANCE)0;
+    return ok;
 }
 
 void hooks_process_install(void) {
     DetourAttach(&(PVOID)Real_CreateProcessW, Hooked_CreateProcessW);
-
-    /* ShellExecuteW is in shell32.dll, load it dynamically */
-    HMODULE hShell32 = GetModuleHandleW(L"shell32.dll");
-    if (!hShell32) hShell32 = LoadLibraryW(L"shell32.dll");
-    if (hShell32) {
-        Real_ShellExecuteW = (HINSTANCE(WINAPI *)(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT))
-            GetProcAddress(hShell32, "ShellExecuteW");
-        if (Real_ShellExecuteW) {
-            DetourAttach(&(PVOID)Real_ShellExecuteW, Hooked_ShellExecuteW);
-        }
-    }
+    DetourAttach(&(PVOID)Real_CreateProcessA, Hooked_CreateProcessA);
 }
 
 void hooks_process_uninstall(void) {
     DetourDetach(&(PVOID)Real_CreateProcessW, Hooked_CreateProcessW);
-    if (Real_ShellExecuteW) {
-        DetourDetach(&(PVOID)Real_ShellExecuteW, Hooked_ShellExecuteW);
-    }
+    DetourDetach(&(PVOID)Real_CreateProcessA, Hooked_CreateProcessA);
 }

@@ -76,11 +76,24 @@ static HANDLE create_restricted_token(void) {
     return hRestricted;
 }
 
+static BOOL create_everyone_sd(SECURITY_ATTRIBUTES *sa, SECURITY_DESCRIPTOR *sd) {
+    InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(sd, TRUE, NULL, FALSE); /* NULL DACL = allow all */
+    sa->nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa->lpSecurityDescriptor = sd;
+    sa->bInheritHandle = FALSE;
+    return TRUE;
+}
+
 static HANDLE create_policy_shared_memory(DWORD pid, const SandboxPolicy *policy) {
     wchar_t name[128];
     swprintf(name, 128, L"%s%lu", SANDBOX_SHMEM_PREFIX, pid);
 
-    HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
+    SECURITY_ATTRIBUTES sa;
+    SECURITY_DESCRIPTOR sd;
+    create_everyone_sd(&sa, &sd);
+
+    HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
                                       PAGE_READWRITE, 0,
                                       (DWORD)sizeof(SandboxPolicy), name);
     if (!hMap) {
@@ -100,40 +113,121 @@ static HANDLE create_policy_shared_memory(DWORD pid, const SandboxPolicy *policy
     return hMap;
 }
 
-/* Build a minimal environment block with only essential system variables.
-   Returns a malloc'd block that the caller must free, or NULL on failure. */
-static char *build_minimal_env(void) {
-    /* Essential vars to keep the OS and basic programs functional */
-    static const char *keep_vars[] = {
-        "SystemRoot", "SystemDrive", "TEMP", "TMP",
-        "COMSPEC", "PATHEXT", "WINDIR", "NUMBER_OF_PROCESSORS",
-        "PROCESSOR_ARCHITECTURE", "OS",
-        NULL
-    };
-
-    char block[8192];
+/* Build a complete environment block for the child process.
+   Never modifies the launcher's own environment.
+   Returns a malloc'd block that the caller must free. */
+static char *build_env_block(const SandboxPolicy *policy, DWORD sandbox_id) {
+    char block[65536];
     size_t pos = 0;
 
-    for (int i = 0; keep_vars[i]; i++) {
-        char val[1024];
-        DWORD len = GetEnvironmentVariableA(keep_vars[i], val, sizeof(val));
-        if (len > 0 && len < sizeof(val)) {
-            int n = snprintf(block + pos, sizeof(block) - pos,
-                             "%s=%s", keep_vars[i], val);
-            if (n < 0 || pos + n + 1 >= sizeof(block)) break;
-            pos += n + 1; /* include the null terminator */
+    /* Helper: is this var name overridden by policy env_vars or SANDBOX_ID? */
+    #define IS_OVERRIDDEN(varname, keylen) \
+        (_strnicmp(varname, "SANDBOX_ID", keylen) == 0 && (keylen) == 10)
+
+    if (policy->inherit_env) {
+        /* Copy current environment, skipping vars we'll override */
+        char *env = GetEnvironmentStringsA();
+        if (env) {
+            const char *p = env;
+            while (*p) {
+                size_t len = strlen(p);
+                const char *eq = strchr(p, '=');
+                int skip = 0;
+
+                if (eq && eq != p) {
+                    size_t keylen = (size_t)(eq - p);
+                    /* Skip SANDBOX_ID — we add our own */
+                    if (keylen == 10 && _strnicmp(p, "SANDBOX_ID", 10) == 0) skip = 1;
+                    /* Skip PATH if we have appends */
+                    if (keylen == 4 && _strnicmp(p, "PATH", 4) == 0 && policy->path_append_count > 0) skip = 1;
+                    /* Skip vars overridden by policy */
+                    for (int i = 0; !skip && i < policy->env_var_count; i++) {
+                        if (strlen(policy->env_vars[i].key) == keylen &&
+                            _strnicmp(p, policy->env_vars[i].key, keylen) == 0) {
+                            skip = 1;
+                        }
+                    }
+                }
+
+                if (!skip && pos + len + 1 < sizeof(block)) {
+                    memcpy(block + pos, p, len + 1);
+                    pos += len + 1;
+                }
+                p += len + 1;
+            }
+            FreeEnvironmentStringsA(env);
+        }
+    } else {
+        /* Minimal env: only essential system vars */
+        static const char *keep_vars[] = {
+            "SystemRoot", "SystemDrive", "TEMP", "TMP",
+            "COMSPEC", "PATHEXT", "WINDIR", "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE", "OS", "PATH",
+            NULL
+        };
+        for (int i = 0; keep_vars[i]; i++) {
+            /* Skip if overridden by policy env vars */
+            int skip = 0;
+            if (_stricmp(keep_vars[i], "PATH") == 0 && policy->path_append_count > 0) skip = 1;
+            for (int j = 0; !skip && j < policy->env_var_count; j++) {
+                if (_stricmp(keep_vars[i], policy->env_vars[j].key) == 0) skip = 1;
+            }
+            if (skip) continue;
+
+            char val[4096];
+            DWORD len = GetEnvironmentVariableA(keep_vars[i], val, sizeof(val));
+            if (len > 0 && len < sizeof(val)) {
+                int n = snprintf(block + pos, sizeof(block) - pos, "%s=%s", keep_vars[i], val);
+                if (n > 0 && pos + n + 1 < sizeof(block)) pos += n + 1;
+            }
         }
     }
+
+    /* Add SANDBOX_ID */
+    {
+        int n = snprintf(block + pos, sizeof(block) - pos, "SANDBOX_ID=%lu", sandbox_id);
+        if (n > 0 && pos + n + 1 < sizeof(block)) pos += n + 1;
+    }
+
+    /* Add custom env vars from policy */
+    for (int i = 0; i < policy->env_var_count; i++) {
+        int n = snprintf(block + pos, sizeof(block) - pos, "%s=%s",
+                         policy->env_vars[i].key, policy->env_vars[i].value);
+        if (n > 0 && pos + n + 1 < sizeof(block)) pos += n + 1;
+        log_msg(LOG_DEBUG, "Set env: %s=%s", policy->env_vars[i].key, policy->env_vars[i].value);
+    }
+
+    /* Add PATH with appends (read original, not modified) */
+    if (policy->path_append_count > 0) {
+        char old_path[8192] = {0};
+        GetEnvironmentVariableA("PATH", old_path, sizeof(old_path));
+        char new_path[16384];
+        int ppos = snprintf(new_path, sizeof(new_path), "%s", old_path);
+        for (int i = 0; i < policy->path_append_count; i++) {
+            if (ppos > 0 && new_path[ppos - 1] != ';')
+                ppos += snprintf(new_path + ppos, sizeof(new_path) - ppos, ";");
+            ppos += snprintf(new_path + ppos, sizeof(new_path) - ppos, "%s", policy->path_appends[i]);
+            log_msg(LOG_DEBUG, "PATH append: %s", policy->path_appends[i]);
+        }
+        int n = snprintf(block + pos, sizeof(block) - pos, "PATH=%s", new_path);
+        if (n > 0 && pos + n + 1 < sizeof(block)) pos += n + 1;
+    }
+
     block[pos] = '\0'; /* double-null terminator */
     pos++;
 
     char *result = (char *)malloc(pos);
     if (result) memcpy(result, block, pos);
     return result;
+
+    #undef IS_OVERRIDDEN
 }
 
 int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
     memset(out, 0, sizeof(SandboxedProcess));
+
+    /* Use launcher PID as sandbox ID — child processes inherit this via env var */
+    DWORD sandbox_id = GetCurrentProcessId();
 
     /* 1. Create Job Object */
     out->hJob = create_job_object(policy);
@@ -155,12 +249,16 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
         snprintf(cmd_line, sizeof(cmd_line), "\"%s\"", policy->target_exe);
     }
 
-    /* 4. Build environment block */
-    char *env_block = NULL;
-    if (!policy->inherit_env) {
-        env_block = build_minimal_env();
-        log_msg(LOG_INFO, "Using minimal environment (inherit_env=false)");
+    /* 4. Build environment block (never modifies launcher's own env) */
+    char *env_block = build_env_block(policy, sandbox_id);
+    if (!env_block) {
+        log_msg(LOG_ERROR, "Failed to build environment block");
+        CloseHandle(hRestricted);
+        CloseHandle(out->hJob);
+        return -1;
     }
+    log_msg(LOG_INFO, "Environment block built (%s)",
+            policy->inherit_env ? "inherited+overrides" : "minimal");
 
     /* 5. Create process suspended with restricted token */
     STARTUPINFOA si = {0};
@@ -202,8 +300,8 @@ int sandbox_create(const SandboxPolicy *policy, SandboxedProcess *out) {
     out->dwProcessId = pi.dwProcessId;
     out->dwThreadId = pi.dwThreadId;
 
-    /* 6. Create shared memory for policy */
-    out->hPolicyMapping = create_policy_shared_memory(pi.dwProcessId, policy);
+    /* 6. Create shared memory for policy (named with launcher PID, not target PID) */
+    out->hPolicyMapping = create_policy_shared_memory(sandbox_id, policy);
     if (!out->hPolicyMapping) {
         log_msg(LOG_WARN, "Shared memory creation failed, hooks won't have policy");
     }

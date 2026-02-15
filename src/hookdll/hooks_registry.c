@@ -46,11 +46,11 @@ static int build_reg_path(HKEY hKey, LPCWSTR subKey, wchar_t *out, size_t out_le
 
 static PolicyAction check_registry_access(HKEY hKey, LPCWSTR subKey) {
     const SandboxPolicy *policy = hook_policy_get();
-    if (!policy) return POLICY_ALLOW;
+    if (!policy) return POLICY_DENY; /* fail-closed: no policy = deny all */
 
     wchar_t full_path[1024];
     if (build_reg_path(hKey, subKey, full_path, 1024) != 0) {
-        return POLICY_ALLOW; /* can't determine path */
+        return POLICY_ALLOW; /* can't determine path from handle, allow */
     }
 
     PolicyAction action = policy_check_registry(policy, full_path);

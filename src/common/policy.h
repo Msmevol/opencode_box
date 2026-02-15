@@ -30,6 +30,11 @@ typedef struct {
 } RegistryRule;
 
 typedef struct {
+    char key[256];
+    char value[1024];
+} EnvVar;
+
+typedef struct {
     /* Target executable */
     char target_exe[MAX_PATH];
     char target_args[1024];
@@ -45,6 +50,10 @@ typedef struct {
     /* Environment inheritance: 1 = inherit parent env, 0 = minimal env only */
     int inherit_env;
 
+    /* Logging: level 0-3 (debug/info/warn/error), -1 = off; log_to_file = save to disk */
+    int log_level;      /* -1=off, 0=debug, 1=info, 2=warn, 3=error */
+    int log_to_file;    /* 1=save log file, 0=no file */
+
     /* File whitelist: only these dirs are accessible, everything else denied */
     int file_allow_count;
     FileAllowRule file_allows[MAX_RULES];
@@ -56,6 +65,14 @@ typedef struct {
     /* Registry rules (first match wins) */
     int registry_rule_count;
     RegistryRule registry_rules[MAX_RULES];
+
+    /* Custom environment variables */
+    int env_var_count;
+    EnvVar env_vars[MAX_RULES];
+
+    /* Paths to append to PATH */
+    int path_append_count;
+    char path_appends[MAX_RULES][MAX_PATH];
 } SandboxPolicy;
 
 /* Parse JSON policy file. Returns 0 on success, -1 on error. */
